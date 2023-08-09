@@ -81,7 +81,7 @@ class ServeClient:
         self.task = task
         device = "cuda" if torch.cuda.is_available() else "cpu"
         self.transcriber = WhisperModel(
-            "small" if multilingual else "small.en", 
+            "/root/.cache/whisper",
             device=device,
             compute_type="int8" if device=="cpu" else "float16", 
             local_files_only=False,

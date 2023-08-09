@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y \
     git \
     bzip2 \
     libx11-6 \
+    wget \
  && rm -rf /var/lib/apt/lists/*
 
 RUN apt update
@@ -41,5 +42,15 @@ RUN pip install -r server.txt
 
 COPY whisper_live /app/whisper_live
 
+# Create the directory for the model
+RUN mkdir -p /root/.cache/whisper
+
+# Download the required files
+RUN wget -O /root/.cache/whisper/model.bin https://huggingface.co/guillaumekln/faster-whisper-small/resolve/main/model.bin
+RUN wget -O /root/.cache/whisper/vocabulary.txt https://huggingface.co/guillaumekln/faster-whisper-small/resolve/main/vocabulary.txt
+RUN wget -O /root/.cache/whisper/tokenizer.json https://huggingface.co/guillaumekln/faster-whisper-small/resolve/main/tokenizer.json
+RUN wget -O /root/.cache/whisper/config.json https://huggingface.co/guillaumekln/faster-whisper-small/resolve/main/config.json
+
 COPY run_server.py /app
 CMD ["python", "run_server.py"]
+

@@ -75,6 +75,97 @@ class Transcribe:
             )
         )
 
+
+    def speech_to_text(self):
+        """
+        Process audio stream in an infinite loop.
+        """
+        # detect language
+        if self.language is None:
+            # wait for 30s of audio
+            while self.frames_np is None or self.frames_np.shape[0] < 30 * self.RATE:
+                time.sleep(1)
+            input_bytes = self.frames_np[-30 * self.RATE:].copy()
+            self.frames_np = None
+            duration = input_bytes.shape[0] / self.RATE
+
+            self.language, lang_prob = self.transcriber.transcribe(
+                input_bytes,
+                initial_prompt=None,
+                language=self.language,
+                task=self.task
+            )
+            logger.info(f"Detected language {self.language} with probability {lang_prob}")
+            self.websocket.send_json({"language": self.language, "language_prob": lang_prob})
+
+        while True:
+            if self.exit:
+                logger.info("Exiting speech to text thread")
+                break
+
+            if self.frames_np is None:
+                continue
+
+            segments = self.process_transcription(self.frames_np, self.frames_np.shape[0] / self.RATE)
+
+            try:
+                if len(segments) > 0:
+                    self.send_segments(segments)
+            except Exception as e:
+                logger.info(f"[ERROR]: {e}")
+                time.sleep(0.01)
+
+    def process_transcription(self, input_bytes, duration):
+        # clip audio if the current chunk exceeds 30 seconds
+        if self.frames_np[int((self.timestamp_offset - self.frames_offset) * self.RATE):].shape[0] > 25 * self.RATE:
+            self.timestamp_offset = self.frames_offset + (self.frames_np.shape[0] / self.RATE) - 5
+
+        samples_take = max(0, (self.timestamp_offset - self.frames_offset) * self.RATE)
+        input_bytes = self.frames_np[int(samples_take):].copy()
+        duration = input_bytes.shape[0] / self.RATE
+        if duration < 1.0:
+            return []
+
+        input_sample = input_bytes.copy()
+        if len(self.text) and self.text[-1] != '':
+            initial_prompt = self.text[-1]
+        else:
+            initial_prompt = None
+
+        result = self.transcriber.transcribe(
+            input_sample,
+            initial_prompt=initial_prompt,
+            language=self.language,
+            task=self.task
+        )
+
+        segments = []
+        if len(result):
+            self.t_start = None
+            last_segment = self.update_segments(result, duration)
+            if len(self.transcript) < self.send_last_n_segments:
+                segments = self.transcript
+            else:
+                segments = self.transcript[-self.send_last_n_segments:]
+
+            if last_segment is not None:
+                segments = segments + [last_segment]
+        else:
+            if self.t_start is None:
+                self.t_start = time.time()
+
+            if time.time() - self.t_start < self.show_prev_out_thresh:
+                if len(self.transcript) < self.send_last_n_segments:
+                    segments = self.transcript
+                else:
+                    segments = self.transcript[-self.send_last_n_segments:]
+
+            if len(self.text) and self.text[-1] != '':
+                if time.time() - self.t_start > self.add_pause_thresh:
+                    self.text.append('')
+
+        return segments
+
     def fill_output(self, output):
         """
         Format output with current and previous complete segments
@@ -114,101 +205,6 @@ class Transcribe:
             self.frames_np = frame_np.copy()
         else:
             self.frames_np = np.concatenate((self.frames_np, frame_np), axis=0)
-
-    def speech_to_text(self):
-        """
-        Process audio stream in an infinite loop.
-        """
-        # detect language
-        if self.language is None:
-            # wait for 30s of audio
-            while self.frames_np is None or self.frames_np.shape[0] < 30 * self.RATE:
-                time.sleep(1)
-            input_bytes = self.frames_np[-30 * self.RATE:].copy()
-            self.frames_np = None
-            duration = input_bytes.shape[0] / self.RATE
-
-            self.language, lang_prob = self.transcriber.transcribe(
-                input_bytes,
-                initial_prompt=None,
-                language=self.language,
-                task=self.task
-            )
-            logger.info(f"Detected language {self.language} with probability {lang_prob}")
-            self.websocket.send_json({"language": self.language, "language_prob": lang_prob})
-
-        while True:
-            if self.exit:
-                logger.info("Exiting speech to text thread")
-                break
-
-            if self.frames_np is None:
-                continue
-            # clip audio if the current chunk exceeds 30 seconds, this basically implies that
-            # no valid segment for the last 30 seconds from whisper
-            if self.frames_np[int((self.timestamp_offset - self.frames_offset)*self.RATE):].shape[0] > 25 * self.RATE:
-                duration = self.frames_np.shape[0] / self.RATE
-                self.timestamp_offset = self.frames_offset + duration - 5
-    
-            samples_take = max(0, (self.timestamp_offset - self.frames_offset)*self.RATE)
-            input_bytes = self.frames_np[int(samples_take):].copy()
-            duration = input_bytes.shape[0] / self.RATE
-            if duration<1.0: 
-                continue
-            try:
-                input_sample = input_bytes.copy()
-                # set previous complete segment as initial prompt
-                if len(self.text) and self.text[-1] != '':
-                    initial_prompt = self.text[-1]
-                else:
-                    initial_prompt = None
-
-                # whisper transcribe with prompt
-                result = self.transcriber.transcribe(
-                    input_sample,
-                    initial_prompt=initial_prompt,
-                    language=self.language,
-                    task=self.task
-                )
-
-                if len(result):
-                    self.t_start = None
-                    last_segment = self.update_segments(result, duration)
-                    if len(self.transcript) < self.send_last_n_segments:
-                        segments = self.transcript
-                    else:
-                        segments = self.transcript[-self.send_last_n_segments:]
-                    if last_segment is not None:
-                        segments = segments + [last_segment]
-                    
-                    try:
-                        self.websocket.send(json.dumps(segments))
-                    except Exception as e:
-                        logger.info(f"[ERROR]: {e}")
-                else:
-                    # show previous output if there is pause i.e. no output from whisper
-                    segments = []
-                    if self.t_start is None: self.t_start = time.time()
-                    if time.time() - self.t_start < self.show_prev_out_thresh:
-                        if len(self.transcript) < self.send_last_n_segments:
-                            segments = self.transcript
-                        else:
-                            segments = self.transcript[-self.send_last_n_segments:]
-                    
-                    # add a blank if there is no speech for 3 seconds
-                    if len(self.text) and self.text[-1] != '':
-                        if time.time() - self.t_start > self.add_pause_thresh:
-                            self.text.append('')
-
-                try:
-                    segments_json = json.dumps(segments)
-                    logger.info(f"segments: {segments_json}")
-                    asyncio.run(manager.send_message(message=segments_json, websocket=self.websocket))                
-                except Exception as e:
-                    logger.info(f"[ERROR]: {e}")            
-            except Exception as e:
-                logger.info(f"[INFO]: {e}")
-                time.sleep(0.01)    
 
     def update_segments(self, segments, duration):
         """
@@ -277,6 +273,13 @@ class Transcribe:
             self.timestamp_offset += offset
 
         return last_segment
+
+    def send_segments(self, segments):
+        try:
+            segments_json = json.dumps(segments)
+            asyncio.run(manager.send_message(message=segments_json, websocket=self.websocket))
+        except Exception as e:
+            logger.info(f"[ERROR]: {e}")
     
     def cleanup(self):
         logger.info("Cleaning up.")

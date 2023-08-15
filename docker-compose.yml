@@ -7,3 +7,8 @@ services:
     ports:
       - "8000:8000"
     image: whisper-live:latest
+    env_file: .env
+    volumes:
+      - ./whisper_model:/app/whisper_model
+      - ./vad_model:/app/vad_model
+      - .:/app

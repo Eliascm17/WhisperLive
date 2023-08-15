@@ -7,6 +7,8 @@ RUN rm -f /etc/apt/sources.list.d/*.list
 
 # Install some basic utilities.
 RUN apt-get update && apt-get install -y \
+    portaudio19-dev \
+    ffmpeg \
     curl \
     ca-certificates \
     sudo \
@@ -23,34 +25,26 @@ RUN apt install software-properties-common -y && \
     add-apt-repository ppa:deadsnakes/ppa && \
     apt update
 
-RUN apt install python3-dev -y && \
-    apt install python-is-python3
-    
+RUN apt install python3.9 python3.9-dev -y && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.9 1
 
 # install pip
 RUN apt install python3-pip -y
+RUN python3 -m pip install --upgrade pip
 
 # Create a working directory.
 RUN mkdir /app
 WORKDIR /app
 
-COPY setup.sh /app
-COPY requirements/ /app
-
-RUN bash setup.sh
+# Copy only the requirements file and install dependencies
+COPY requirements/server.txt /app/
 RUN pip install -r server.txt
 
+# Copy the rest of the code
+COPY entrypoint.sh /app/entrypoint.sh
+COPY main.py /app/main.py
 COPY whisper_live /app/whisper_live
 
-# Create the directory for the model
-RUN mkdir -p /root/.cache/whisper
+RUN chmod +x /app/entrypoint.sh
 
-# Download the required files
-RUN wget -O /root/.cache/whisper/model.bin https://huggingface.co/guillaumekln/faster-whisper-small/resolve/main/model.bin
-RUN wget -O /root/.cache/whisper/vocabulary.txt https://huggingface.co/guillaumekln/faster-whisper-small/resolve/main/vocabulary.txt
-RUN wget -O /root/.cache/whisper/tokenizer.json https://huggingface.co/guillaumekln/faster-whisper-small/resolve/main/tokenizer.json
-RUN wget -O /root/.cache/whisper/config.json https://huggingface.co/guillaumekln/faster-whisper-small/resolve/main/config.json
-
-COPY run_server.py /app
-CMD ["python", "run_server.py"]
-
+ENTRYPOINT ["/app/entrypoint.sh"]

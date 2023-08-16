@@ -63,40 +63,11 @@ class Transcribe:
         self.websocket = websocket
         self.client_id = client_id
 
-        # threading
-        self.trans_thread = threading.Thread(target=self.speech_to_text)
-        self.trans_thread.start()
-        self.websocket.send(
-            json.dumps(
-                {
-                    "client_id": self.client_id,
-                    "message": self.SERVER_READY
-                }
-            )
-        )
-
-
-    def speech_to_text(self):
+    async def speech_to_text(self):
         """
         Process audio stream in an infinite loop.
         """
-        # detect language
-        if self.language is None:
-            # wait for 30s of audio
-            while self.frames_np is None or self.frames_np.shape[0] < 30 * self.RATE:
-                time.sleep(1)
-            input_bytes = self.frames_np[-30 * self.RATE:].copy()
-            self.frames_np = None
-            duration = input_bytes.shape[0] / self.RATE
-
-            self.language, lang_prob = self.transcriber.transcribe(
-                input_bytes,
-                initial_prompt=None,
-                language=self.language,
-                task=self.task
-            )
-            logger.info(f"Detected language {self.language} with probability {lang_prob}")
-            self.websocket.send_json({"language": self.language, "language_prob": lang_prob})
+        logger.info("Starting speech_to_text")
 
         while True:
             if self.exit:
@@ -104,18 +75,22 @@ class Transcribe:
                 break
 
             if self.frames_np is None:
+                logger.info("Frames are None, waiting for data")
+                await asyncio.sleep(1)  # Add a sleep to prevent busy-waiting
                 continue
 
-            segments = self.process_transcription(self.frames_np, self.frames_np.shape[0] / self.RATE)
+            logger.info("Processing transcription")
+            segments = await self.process_transcription(self.frames_np, self.frames_np.shape[0] / self.RATE)
 
             try:
                 if len(segments) > 0:
-                    self.send_segments(segments)
+                    logger.info(f"Sending {len(segments)} segments")
+                    await self.send_segments(segments)
             except Exception as e:
-                logger.info(f"[ERROR]: {e}")
-                time.sleep(0.01)
+                logger.error(f"[ERROR] Failed to send segments: {e}")
+                await asyncio.sleep(0.01)
 
-    def process_transcription(self, input_bytes, duration):
+    async def process_transcription(self, input_bytes, duration):
         # clip audio if the current chunk exceeds 30 seconds
         if self.frames_np[int((self.timestamp_offset - self.frames_offset) * self.RATE):].shape[0] > 25 * self.RATE:
             self.timestamp_offset = self.frames_offset + (self.frames_np.shape[0] / self.RATE) - 5
@@ -132,17 +107,18 @@ class Transcribe:
         else:
             initial_prompt = None
 
-        result = self.transcriber.transcribe(
-            input_sample,
-            initial_prompt=initial_prompt,
-            language=self.language,
-            task=self.task
-        )
+        result = await asyncio.to_thread(
+            self.transcriber.transcribe(
+                input_sample,
+                initial_prompt=initial_prompt,
+                language=self.language,
+                task=self.task
+            ))
 
         segments = []
         if len(result):
             self.t_start = None
-            last_segment = self.update_segments(result, duration)
+            last_segment = await self.update_segments(result, duration)
             if len(self.transcript) < self.send_last_n_segments:
                 segments = self.transcript
             else:
@@ -274,10 +250,10 @@ class Transcribe:
 
         return last_segment
 
-    def send_segments(self, segments):
+    async def send_segments(self, segments):
         try:
             segments_json = json.dumps(segments)
-            asyncio.run(manager.send_message(message=segments_json, websocket=self.websocket))
+            await manager.send_message(message=segments_json, websocket=self.websocket)
         except Exception as e:
             logger.info(f"[ERROR]: {e}")
     
@@ -285,3 +261,12 @@ class Transcribe:
         logger.info("Cleaning up.")
         self.exit = True
         self.transcriber.destroy()
+
+    async def initialize(self):
+        await self.websocket.accept()
+        await self.websocket.send_json(
+            {
+                "client_id": self.client_id,
+                "message": self.SERVER_READY
+            }
+        )
